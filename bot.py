@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MANUS_AI_API_KEY = os.getenv("MANUS_AI_API_KEY")
-MANUS_AI_API_URL = "https://api.manus.im/v1/tasks"
+MANUS_AI_API_URL = "https://api.manus.ai/v1/tasks"
 
 # Enable logging
 logging.basicConfig(
