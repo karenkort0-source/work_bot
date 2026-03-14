@@ -14,16 +14,15 @@ API_BASE_URL = "https://api.manus.ai/v1/tasks"
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def fast_parse(result_data):
-    """极速解析：只要有内容就提取，不管任务是否完全结束"""
-    if not result_data or not isinstance(result_data, list):
-        return None
+def fast_extract(result_data):
+    """最快路径提取：只拿最新助手的纯文字"""
+    if not isinstance(result_data, list): return None
+    # 倒序查找，优先获取最新的 assistant 回复
     for item in reversed(result_data):
         if item.get("role") == "assistant":
-            contents = item.get("content", [])
-            texts = [c.get("text") for c in contents if c.get("type") == "output_text" and c.get("text")]
-            if texts:
-                return "\n".join(texts).strip()
+            for content in item.get("content", []):
+                if content.get("type") == "output_text" and content.get("text"):
+                    return content.get("text").strip()
     return None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -33,51 +32,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     headers = {"API_KEY": MANUS_KEY, "Content-Type": "application/json"}
     payload = {"prompt": user_text, "taskMode": "chat"}
 
-    # 1. 立即响应
-    status_msg = await update.message.reply_text("⚡ 正在联络 Manus...")
+    # 1. 立即反馈（降低用户感知的等待时间）
+    status_msg = await update.message.reply_text("⚡ 发起任务...")
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            # 第一步：极速提交
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # 第一步：极速创建
             resp = await client.post(API_BASE_URL, headers=headers, json=payload)
             resp.raise_for_status()
-            task_info = resp.json()
-            task_id = task_info.get("task_id")
-
-        # 第二步：高频轮询（前30秒每2秒查一次，追求极限速度）
-        async with httpx.AsyncClient(timeout=10.0) as check_client:
-            for i in range(50): 
-                await asyncio.sleep(2) 
+            task_id = resp.json().get("task_id")
+            
+            # 2. 动态轮询（根据耗时自动调整频率）
+            for i in range(60): # 最多持续轮询
+                # 前 15 秒每秒查 1 次，15 秒后每 2 秒查 1 次
+                await asyncio.sleep(1 if i < 15 else 2) 
                 
                 try:
-                    s_res = await check_client.get(f"{API_BASE_URL}/{task_id}", headers=headers)
+                    s_res = await client.get(f"{API_BASE_URL}/{task_id}", headers=headers)
                     s_data = s_res.json()
                     
-                    # 只要拿到文字内容，立刻更新并结束对话
-                    answer = fast_parse(s_data.get("result"))
+                    # 关键点：只要拿到文字，不论 status 是什么，立刻同步到 TG
+                    answer = fast_extract(s_data.get("result"))
                     if answer:
                         await status_msg.edit_text(answer)
                         return
                     
-                    # 如果 Manus 明确报错
+                    # 报错处理
                     if s_data.get("status") in ["failed", "error"]:
-                        await status_msg.edit_text("❌ Manus 任务执行中断。")
+                        await status_msg.edit_text("❌ Manus 执行过程中断，请重试。")
                         return
 
                 except Exception as e:
-                    logger.error(f"轮询微报错: {e}")
+                    logger.error(f"轮询抖动: {e}")
                     continue
 
-            await status_msg.edit_text(f"⌛ 任务处理中，请查看：\n{task_info.get('task_url')}")
+            await status_msg.edit_text("⌛ 任务执行较慢，建议点开链接查看进度。")
 
     except Exception as e:
         logger.error(f"连接失败: {e}")
-        await status_msg.edit_text("⚠️ 访问超时，请重试。")
+        await status_msg.edit_text("⚠️ 接口连接超时，请检查网络。")
 
 def main():
     if not TOKEN: sys.exit(1)
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("✅ 极速版已就绪。")))
+    # 使用并发级别更高的 Application
+    app = Application.builder().token(TOKEN).concurrent_updates(True).build()
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("✅ 极速稳定版已就绪。")))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling()
 
