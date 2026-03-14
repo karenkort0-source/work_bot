@@ -1,94 +1,91 @@
 import logging
-import requests
+import httpx
 import os
+import sys
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-MANUS_AI_API_KEY = os.getenv("MANUS_AI_API_KEY")
+# --- 配置区 ---
+# 建议在 Railway Variables 页面确保变量名完全一致
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+MANUS_AI_API_KEY = os.environ.get("MANUS_AI_API_KEY")
 MANUS_AI_API_URL = "https://api.manus.ai/v1/tasks"
 
-# Enable logging
+# 日志设置
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued."""
+    """响应 /start 命令"""
     user = update.effective_user
     await update.message.reply_html(
-        f"Привет, {user.mention_html()}! Я бот, который поможет тебе общаться с Manus AI."
+        f"你好, {user.mention_html()}! 我是 Manus AI 助手，请直接给我发送消息。"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /help is issued."""
-    await update.message.reply_text("Просто отправь мне сообщение, и я перешлю его Manus AI.")
+    """响应 /help 命令"""
+    await update.message.reply_text("只需向我发送文本消息，我会将其转发给 Manus AI。")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming messages and forward to Manus AI."""
+    """处理消息并异步转发至 Manus AI"""
     user_message = update.message.text
     chat_id = update.effective_chat.id
 
     if not user_message:
-        await update.message.reply_text("Пожалуйста, отправьте текстовое сообщение.")
         return
 
-    logger.info(f"Получено сообщение от {chat_id}: {user_message}")
+    logger.info(f"收到来自 {chat_id} 的消息: {user_message}")
 
     if not MANUS_AI_API_KEY:
-        logger.error("MANUS_AI_API_KEY не установлен.")
-        await update.message.reply_text("Извините, API-ключ Manus AI не настроен. Пожалуйста, сообщите администратору.")
-        return
-
-    if not MANUS_AI_API_URL:
-        logger.error("MANUS_AI_API_URL не установлен.")
-        await update.message.reply_text("Извините, URL Manus AI не настроен. Пожалуйста, сообщите администратору.")
+        logger.error("MANUS_AI_API_KEY 未设置")
+        await update.message.reply_text("错误：Manus AI API-Key 未配置，请在服务器设置环境变量。")
         return
 
     headers = {
-        "API_KEY": f"{MANUS_AI_API_KEY}",
+        "API_KEY": MANUS_AI_API_KEY,
         "Content-Type": "application/json"
     }
     payload = {
         "prompt": user_message,
-        "attachments": [],
         "taskMode": "chat",
-        "connectors": [],
-        "hideInTaskList": True,
-        "createShareableLink": True,
-        "taskId": "",
         "agentProfile": "speed",
-        "locale": ""
     }
 
+    # 使用 httpx 异步请求，防止群组卡顿
     try:
-        response = requests.post(MANUS_AI_API_URL, headers=headers, json=payload)
-        response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
-        manus_response = response.json()
-        logger.info(f"Ответ от Manus AI: {manus_response}")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(MANUS_AI_API_URL, headers=headers, json=payload)
+            response.raise_for_status()
+            manus_response = response.json()
+            
+            # 兼容不同的返回格式
+            ai_reply = manus_response.get("result") or manus_response.get("response") or "未能获取有效回复"
+            await update.message.reply_text(ai_reply)
 
-        ai_reply = manus_response.get("result", manus_response.get("response", "Извините, не удалось получить ответ от Manus AI."))
-        
-        await update.message.reply_text(ai_reply)
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка при запросе к Manus AI: {e}")
-        await update.message.reply_text("Извините, произошла ошибка при обращении к Manus AI.")
     except Exception as e:
-        logger.error(f"Неизвестная ошибка: {e}")
-        await update.message.reply_text("Извините, произошла непредвиденная ошибка.")
+        logger.error(f"请求失败: {e}")
+        await update.message.reply_text("抱歉，连接 Manus AI 时发生错误。")
 
 def main() -> None:
-    """Start the bot."""
+    """启动机器人"""
+    # 强制检查 Token
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("!!! 致命错误: 无法读取 TELEGRAM_BOT_TOKEN !!!")
+        logger.info("请检查 Railway 后台 Variables 是否添加了该变量。")
+        sys.exit(1)
+
+    logger.info("正在启动机器人...")
+    
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # 开始轮询
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
-
